@@ -40,19 +40,19 @@ end
 function model()
     p1 = Point(0.0, 0.0)
     p2 = Point(1.0, 0.0)
-    p3 = Point(1.0, 1.0)
-    p4 = Point(0.0, 1.0)
+    p3 = Point(1.0, 2.0)
+    p4 = Point(0.0, 2.0)
 
     bc_bottom = BoundaryCondition{Dirichlet}(0.0)
-    bc_side1 = BoundaryCondition{Dirichlet}(10.0)
-    bc_side2 = BoundaryCondition{Neumann}(0.0)
-    bc_top = BoundaryCondition{Neumann}(0.0)
+    bc_right = BoundaryCondition{Neumann}(0.0)
+    bc_left = BoundaryCondition{Neumann}(0.0)
+    bc_top = BoundaryCondition{Dirichlet}(100.0)
 
     # The boundary segments need to be closed
     s1 = BoundarySegment(p1, p2, bc_bottom)
-    s2 = BoundarySegment(p2, p3, bc_side1)
+    s2 = BoundarySegment(p2, p3, bc_right)
     s3 = BoundarySegment(p3, p4, bc_top)
-    s4 = BoundarySegment(p4, p1, bc_side2)
+    s4 = BoundarySegment(p4, p1, bc_left)
 
     boundary = [s1, s2, s3, s4]
 
@@ -160,6 +160,57 @@ end
 # left hand side, A, corresponds to the vector of unknown potential and flux
 # values x. Thus, the system we need to solve is Ax = b.
 
+# Working, but is probably inefficient. Might be able to speed up by forming
+# A and B without the intermediate F and G matrices
+function form_system_2(discrete_boundary::Array{BoundaryElement})
+    n = length(discrete_boundary) # Number of boundary elements
+
+    # Create F and G matrices
+    F = Array{Float64}(n,n)
+    G = Array{Float64}(n,n)
+    for i in 1:n # Iterate over collocation points
+        source = discrete_boundary[i].node
+        for j in 1:n # Iterate over boundary elements
+            if i == j
+                G[i,j] = kernel_integral(source, discrete_boundary[j],
+                                         Neumann())
+            else
+                F[i,j] = kernel_integral(source, discrete_boundary[j],
+                                         Dirichlet())
+                G[i,j] = kernel_integral(source, discrete_boundary[j],
+                                         Neumann())
+            end
+        end
+        diag = 0.0
+        for k in 1:n
+            diag += F[i,k]
+        end
+        F[i,i] = -1.0*diag
+    end
+
+    # Create A, B matrices and boundary condition vector. This is the enforce
+    # boundary condition step
+    A = Array{Float64}(n, n)
+    B = Array{Float64}(n, n)
+    bc_vec = Array{Float64}(n)
+    for i in 1:n
+        if typeof(discrete_boundary[i]) == BoundaryElement{Dirichlet}
+            A[:,i] = -1.0*slice(G,:,i)
+            B[:,i] = -1.0*slice(F,:,i)
+        else
+            A[:,i] = slice(F,:,i)
+            B[:,i] = slice(G,:,i)
+        end
+        bc_vec[i] = discrete_boundary[i].value
+    end
+
+    # Create right had side vector
+    b = B*bc_vec
+
+    return A, b
+end
+
+# Not working right now, but an attempt to make system assembely faster
 function form_system(discrete_boundary::Array{BoundaryElement})
     c = 0.5 # c(x) value from boundary integral formulation
     n = length(discrete_boundary) # Number of boundary elements
@@ -254,10 +305,10 @@ end
 function dbem(nelm)
     boundary, field_points = model()
     discrete_boundary = discretize(boundary, nelm)
-    A, b = form_system(discrete_boundary)
+    A, b = form_system_2(discrete_boundary)
     # Direct solve
     x = A\b
-    u, q = form_vectors(x, discrete_boundary)
-    pot_vals = field_values(u, q, discrete_boundary, field_points)
-    return u, q, pot_vals
+    #u, q = form_vectors(x, discrete_boundary)
+    #pot_vals = field_values(u, q, discrete_boundary, field_points)
+    return x
 end
