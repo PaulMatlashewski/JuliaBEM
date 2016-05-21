@@ -1,96 +1,8 @@
 # A first pass at programming the direct boundary element method (DBEM).
 # For now, only constant elements are implemented.
 
-################################################################################
-# Type Definitions
-################################################################################
-# Geometry types
-abstract segment
-immutable Point{T<:Float64}
-    x::T # x coordinate
-    y::T # y coordinate
-end
-immutable BoundarySegment{T1<:Point, T2<:Array{Float64}}
-    p1::T1 # Start point
-    p2::T1 # End point
-    n::T2  # Outward unit normal vector
-end
-
-# Boundary condition types
-abstract BoundaryCondition
-immutable Dirichlet <: BoundaryCondition
-val::Float64
-end
-immutable Neumann <: BoundaryCondition
-val::Float64
-end
-
-# Boundary element types
-abstract BoundaryElement
-immutable ConstantElement{T1<:Point,
-                          T2<:Array{Float64},
-                          T3<:BoundaryCondition} <: BoundaryElement
-    p1::T1 # Segment start point
-    p2::T1 # Segment end point
-    node::T1 # Bubble node in the centre of the element
-    n::T2 # Outward unit normal vector
-    bc_node::T3 # Boundary condition at node
-end
-immutable LinearElement{T1<:Point,
-                        T2<:Array{Float64},
-                        T3<:BoundaryCondition} <: BoundaryElement
-    p1::T1 # Segment start point
-    p2::T1 # Segment end point
-    # Shape function nodes coincide with p1 and p2
-    n::T2 # Outward unit normal vector
-    bc_1::T3 # Boundary Condition at p1
-    bc_2::T3 # Boundary Condition at p2
-end
-immutable QuadraticElement{T1<:Point,
-                           T2<:Array{Float64},
-                           T3<:BoundaryCondition} <: BoundaryElement
-    p1::T1 # Segment start point
-    p2::T1 # Segment end point
-    # First quadratic node coincides with p1
-    node::T1 # Second quadratic node at the centre of the interval
-    # Third quadratic node coincides with p2
-    n::T2 # Outward unit normal vector
-    bc_1::T3 # Boundary condition at p1
-    bc_node::T3 # Boundary condition at node
-    bc_2::T3 # Boundary condition at p2
-end
-
-# Kernel types
-abstract LaplaceKernel
-immutable PotentialKernel <: LaplaceKernel
-end
-immutable FluxKernel <: LaplaceKernel
-end
-
-################################################################################
-# Define the geometry of the model. For now, this is directly input here.
-# Later on, this will read from a file and return a list of geometry points
-# that define the model boundary.
-################################################################################
-function model()
-    # Outer boundary points
-    p1 = Point(0.0, 0.0)
-    p2 = Point(1.0, 0.0)
-    p3 = Point(1.0, 2.0)
-    p4 = Point(0.0, 2.0)
-
-    # Boundary segments
-    n1 = [p2.y - p1.y, p1.x - p2.x]/norm([p2.y - p1.y, p1.x - p2.x])
-    n2 = [p3.y - p2.y, p2.x - p3.x]/norm([p3.y - p2.y, p2.x - p3.x])
-    n3 = [p4.y - p3.y, p3.x - p4.x]/norm([p4.y - p3.y, p3.x - p4.x])
-    n4 = [p1.y - p4.y, p4.x - p1.x]/norm([p1.y - p4.y, p4.x - p1.x])
-    b1 = BoundarySegment(p1, p2, n1)
-    b2 = BoundarySegment(p2, p3, n2)
-    b3 = BoundarySegment(p3, p4, n3)
-    b4 = BoundarySegment(p4, p1, n4)
-
-    return [b1, b2, b3, b4]
-end
+include("BEMTypes.jl")
+include("BEMModel.jl")
 
 ################################################################################
 # Discretize the outer boundary. The methods for discretize() are determined
@@ -257,22 +169,62 @@ function build_system(mesh::Array{ConstantElement,1}, A::Array{Float64,2},
     return A, b
 end
 
-function dbem_row()
-    bndy = model()
+function boundary_values!(u::Array{Float64}, q::Array{Float64},
+                          x::Array{Float64}, mesh::Array{ConstantElement,1})
+    n = length(mesh)
+    for i in 1:n
+        if typeof(mesh[i].bc_node) <: Dirichlet
+            u[i] = mesh[i].bc_node.val
+            q[i] = x[i]
+        else
+            u[i] = x[i]
+            q[i] = mesh[i].bc_node.val
+        end
+    end
+    return u, q
+end
+
+function field_values!(u_field::Array{Float64,2}, u_point::Array{Point,2},
+                       u::Array{Float64}, q::Array{Float64},
+                       mesh::Array{ConstantElement,1})
+    n1 = size(u_point)[1]
+    n2 = size(u_point)[2]
+    m = length(mesh)
+    for i in 1:n1
+        for j in 1:n2
+            coll = u_point[i,j]
+            u_sum = 0.0
+            q_sum = 0.0
+            for k in 1:m
+                u_sum += u[k]*kernel_integral(coll, mesh[k], FluxKernel())
+                q_sum += q[k]*kernel_integral(coll, mesh[k], PotentialKernel())
+            end
+            u_field[i,j] = u_sum - q_sum
+        end
+    end
+    return u_field
+end
+
+function dbem(m)
+    bndy, u_point = model()
     bc1 = Dirichlet(0.0)
     bc2 = Dirichlet(100.0)
     bc3 = Neumann(0.0)
     bcs = [bc1, bc3, bc2, bc3]
-    res = [1000, 1000, 1000, 1000]
+    res = [m, m, m, m]
     mesh = ConstantElement[]
     mesh = discretize!(mesh, bndy, bcs, res)
 
     n = length(mesh)
     A = Array{Float64}(n,n)
     B = Array{Float64}(n,n)
-    F = Array{Float64}(n,n)
-    G = Array{Float64}(n,n)
     bc_vec = Array{Float64}(n)
     A, b = build_system(mesh, A, B, bc_vec)
-    return A\b
+    x = A\b
+    #u = Array{Float64}(n)
+    #q = Array{Float64}(n)
+    #u, q = boundary_values!(u, q, x, mesh)
+    #u_field = Array{Float64}(size(u_point))
+    #u_field = field_values!(u_field, u_point, u, q, mesh)
+    #return u_field, u, q
 end
