@@ -1,314 +1,278 @@
 # A first pass at programming the direct boundary element method (DBEM).
 # For now, only constant elements are implemented.
 
-# Type declarations
-
-immutable Dirichlet
+################################################################################
+# Type Definitions
+################################################################################
+# Geometry types
+abstract segment
+immutable Point{T<:Float64}
+    x::T # x coordinate
+    y::T # y coordinate
+end
+immutable BoundarySegment{T1<:Point, T2<:Array{Float64}}
+    p1::T1 # Start point
+    p2::T1 # End point
+    n::T2  # Outward unit normal vector
 end
 
-immutable Neumann
+# Boundary condition types
+abstract BoundaryCondition
+immutable Dirichlet <: BoundaryCondition
+val::Float64
+end
+immutable Neumann <: BoundaryCondition
+val::Float64
 end
 
-immutable BoundaryCondition{T}
-    value::Float64 # Value of the boundary condition
+# Boundary element types
+abstract BoundaryElement
+immutable ConstantElement{T1<:Point,
+                          T2<:Array{Float64},
+                          T3<:BoundaryCondition} <: BoundaryElement
+    p1::T1 # Segment start point
+    p2::T1 # Segment end point
+    node::T1 # Bubble node in the centre of the element
+    n::T2 # Outward unit normal vector
+    bc_node::T3 # Boundary condition at node
+end
+immutable LinearElement{T1<:Point,
+                        T2<:Array{Float64},
+                        T3<:BoundaryCondition} <: BoundaryElement
+    p1::T1 # Segment start point
+    p2::T1 # Segment end point
+    # Shape function nodes coincide with p1 and p2
+    n::T2 # Outward unit normal vector
+    bc_1::T3 # Boundary Condition at p1
+    bc_2::T3 # Boundary Condition at p2
+end
+immutable QuadraticElement{T1<:Point,
+                           T2<:Array{Float64},
+                           T3<:BoundaryCondition} <: BoundaryElement
+    p1::T1 # Segment start point
+    p2::T1 # Segment end point
+    # First quadratic node coincides with p1
+    node::T1 # Second quadratic node at the centre of the interval
+    # Third quadratic node coincides with p2
+    n::T2 # Outward unit normal vector
+    bc_1::T3 # Boundary condition at p1
+    bc_node::T3 # Boundary condition at node
+    bc_2::T3 # Boundary condition at p2
 end
 
-immutable Point
-    x::Float64
-    y::Float64
+# Kernel types
+abstract LaplaceKernel
+immutable PotentialKernel <: LaplaceKernel
+end
+immutable FluxKernel <: LaplaceKernel
 end
 
-immutable BoundarySegment
-    p1::Point              # Start point
-    p2::Point              # End point
-    bc::BoundaryCondition  # Boundary condition on the segment
-end
-
-immutable BoundaryElement{T}
-    p1::Point
-    p2::Point
-    node::Point
-    value::Float64
-end
-
+################################################################################
 # Define the geometry of the model. For now, this is directly input here.
 # Later on, this will read from a file and return a list of geometry points
 # that define the model boundary.
-# We test with a 1x1 square domain. The bottom and top have Dirichlet conditions
-# of 0 and 100 respectively while the left and right have homogeneous Neumann
-# conditions.
+################################################################################
 function model()
+    # Outer boundary points
     p1 = Point(0.0, 0.0)
     p2 = Point(1.0, 0.0)
     p3 = Point(1.0, 2.0)
     p4 = Point(0.0, 2.0)
 
-    bc_bottom = BoundaryCondition{Dirichlet}(0.0)
-    bc_right = BoundaryCondition{Neumann}(0.0)
-    bc_left = BoundaryCondition{Neumann}(0.0)
-    bc_top = BoundaryCondition{Dirichlet}(100.0)
+    # Boundary segments
+    n1 = [p2.y - p1.y, p1.x - p2.x]/norm([p2.y - p1.y, p1.x - p2.x])
+    n2 = [p3.y - p2.y, p2.x - p3.x]/norm([p3.y - p2.y, p2.x - p3.x])
+    n3 = [p4.y - p3.y, p3.x - p4.x]/norm([p4.y - p3.y, p3.x - p4.x])
+    n4 = [p1.y - p4.y, p4.x - p1.x]/norm([p1.y - p4.y, p4.x - p1.x])
+    b1 = BoundarySegment(p1, p2, n1)
+    b2 = BoundarySegment(p2, p3, n2)
+    b3 = BoundarySegment(p3, p4, n3)
+    b4 = BoundarySegment(p4, p1, n4)
 
-    # The boundary segments need to be closed
-    s1 = BoundarySegment(p1, p2, bc_bottom)
-    s2 = BoundarySegment(p2, p3, bc_right)
-    s3 = BoundarySegment(p3, p4, bc_top)
-    s4 = BoundarySegment(p4, p1, bc_left)
+    return [b1, b2, b3, b4]
+end
 
-    boundary = [s1, s2, s3, s4]
-
-    # Field points. These are the points where the potential is calculated
-    # using the boundary integral formula after the DBEM system is solved.
-    n = 100 # Number of x internal field grid points
-    m = 100 # Number of y internal field grid points
-    dx = 1.0/(n + 1)
-    dy = 1.0/(m + 1)
-    field_points = Array{Point}(n,m)
-    k = 1
-    for i in 1:n
-        for j in 1:m
-            field_points[i,j] = Point(i*dx, j*dy)
+################################################################################
+# Discretize the outer boundary. The methods for discretize() are determined
+# by the type of shape function passed. The bcs array contains an expression
+# to evaluate the boundary condition on each element as a function of x and y.
+# There must be a boundary condition for each boundary segment i.e. the length
+# of bcs must equal the length of boundary. The res array contains an integer
+# representing the number of subdivisions wanted for each boundary segment.
+# Future functionality should incorporate a better way to smoothly grade the
+# boundary mesh as this current method can generate abrupt changes in mesh size.
+################################################################################
+function discretize!{T<:BoundarySegment}(mesh::Array{ConstantElement,1},
+                     boundary::Array{T}, bcs::Array{BoundaryCondition,1},
+                     res::Array{Int64})
+    for i in 1:length(boundary)
+        delta_x = boundary[i].p2.x - boundary[i].p1.x
+        delta_y = boundary[i].p2.y - boundary[i].p1.y
+        for j in 1:res[i]
+            dx = delta_x/res[i]
+            dy = delta_y/res[i]
+            p1 = Point(boundary[i].p1.x + (j-1)*dx, boundary[i].p1.y + (j-1)*dy)
+            p2 = Point(boundary[i].p1.x + j*dx, boundary[i].p1.y + j*dy)
+            node = Point((p1.x + p2.x)/2.0, (p1.y + p2.y)/2.0)
+            n = boundary[i].n
+            bc_node = bcs[i]
+            push!(mesh, ConstantElement(p1, p2, node, n, bc_node))
         end
     end
-
-    return boundary, field_points
+    return mesh
 end
 
-# Discretize the boundary. The first argment is the model boundary and the
-# second argument is the number of boundary elements wanted on each boundary
-# segment. For example, if n_elm[1] = 10, the first boundary segment will be
-# partitioned into 10 uniform elements. The length of n_elm must equal the
-# length of boundary.
-
-# Future functionality should allow for the system GMSH uses where an elmement
-# size is specified at each geometry point rather than the segments. This would
-# allow for a continuous element size transition along segments rather than
-# sudden element size transitions.
-
-function discretize(boundary::Array{BoundarySegment}, nelm::Array{Int64})
-    discrete_boundary = Array{BoundaryElement}(sum(nelm))
-    i = 1 # Current boundary element number
-    j = 1 # Current boundary element number
-    for segment in boundary
-        n = nelm[i] # Number of boundary elements on segment
-        dx = (segment.p2.x - segment.p1.x)/n
-        dy = (segment.p2.y - segment.p1.y)/n
-        for k in 1:n
-            p1_x = segment.p1.x + dx*(k - 1)
-            p1_y = segment.p1.y + dy*(k - 1)
-            p2_x = segment.p1.x + dx*k
-            p2_y = segment.p1.y + dy*k
-            p1 = Point(p1_x, p1_y)
-            p2 = Point(p2_x, p2_y)
-            node_x = (p1.x + p2.x)/2
-            node_y = (p1.y + p2.y)/2
-            node = Point(node_x, node_y)
-            value = segment.bc.value
-            if typeof(segment.bc) == BoundaryCondition{Dirichlet}
-                T = Dirichlet
-            else
-                T = Neumann
-            end
-            discrete_boundary[j] = BoundaryElement{T}(p1, p2, node, value)
-            j += 1
+function discretize!{T<:BoundarySegment}(mesh::Array{LinearElement,1},
+                     boundary::Array{T}, bcs_1::Array{BoundaryCondition},
+                     bcs_2::Array{BoundaryCondition}, res::Array{Int64})
+    for i in 1:length(boundary)
+        delta_x = boundary[i].p2.x - boundary[i].p1.x
+        delta_y = boundary[i].p2.y - boundary[i].p1.y
+        for j in 1:res[i]
+            dx = delta_x/res[i]
+            dy = delta_y/res[i]
+            p1 = Point(boundary[i].p1.x + (j-1)*dx, boundary[i].p1.y + (j-1)*dy)
+            p2 = Point(boundary[i].p1.x + j*dx, boundary[i].p1.y + j*dy)
+            n = boundary[i].n
+            bc_1 = bcs_1[i]
+            bc_2 = bcs_2[i]
+            push!(mesh, LinearElement(p1, p2, n, bc_1, bc_2))
         end
-        i += 1
     end
-    return discrete_boundary
+    return mesh
 end
 
-# G kernel exact integral
-function kernel_integral(source::Point, field::BoundaryElement, T::Neumann)
-    # Geometry calculations
-    r1 = [field.p1.x - source.x, field.p1.y - source.y]
-    r2 = [field.p2.x - source.x, field.p2.y - source.y]
-    R = r2 - r1
-    T1 = dot(r1, R)/norm(R)
-    T2 = dot(r2, R)/norm(R)
-    d = r1 - dot(r1,R)/dot(R,R)*R
-    theta1 = asin(dot(r1, R)/(norm(r1)*norm(R)))
-    theta2 = asin(dot(r2, R)/(norm(r2)*norm(R)))
-
-    return 1/(2*pi)*(-1*(theta2 - theta1)*norm(d) +
-                         abs((T2 - T1)) - T2*log(norm(r2)) + T1*log(norm(r1)))
+function discretize!{T<:BoundarySegment}(mesh::Array{QuadraticElement,1},
+                     boundary::Array{T}, bcs_1::Array{BoundaryCondition},
+                     bcs_node::Array{BoundaryCondition},
+                     bcs_2::Array{BoundaryCondition}, res::Array{Int64})
+    for i in 1:length(boundary)
+        delta_x = boundary[i].p2.x - boundary[i].p1.x
+        delta_y = boundary[i].p2.y - boundary[i].p1.y
+        for j in 1:res[i]
+            dx = delta_x/res[i]
+            dy = delta_y/res[i]
+            p1 = Point(boundary[i].p1.x + (j-1)*dx, boundary[i].p1.y + (j-1)*dy)
+            p2 = Point(boundary[i].p1.x + j*dx, boundary[i].p1.y + j*dy)
+            node = Point((p1.x + p2.x)/2.0, (p1.y + p2.y)/2.0)
+            n = boundary[i].n
+            bc_1 = bcs_1[i]
+            bc_node = bcs_node[i]
+            bc_2 = bcs_2[i]
+            push!(mesh, QuadraticElement(p1, p2, node, n, bc_1, bc_node, bc_2))
+        end
+    end
+    return mesh
 end
 
-# F kernel exact integral
-function kernel_integral(source::Point, field::BoundaryElement, T::Dirichlet)
+# G kernel
+function kernel_integral(coll::Point, element::ConstantElement,
+                         ::PotentialKernel)
     # Geometry calculations
-    r1 = [field.p1.x - source.x, field.p1.y - source.y]
-    r2 = [field.p2.x - source.x, field.p2.y - source.y]
-    R = r2 - r1
-    theta1 = asin(dot(r1, R)/(norm(r1)*norm(R)))
-    theta2 = asin(dot(r2, R)/(norm(r2)*norm(R)))
+    r1_x = element.p1.x - coll.x
+    r1_y = element.p1.y - coll.y
+    r2_x = element.p2.x - coll.x
+    r2_y = element.p2.y - coll.y
+    R_x = r2_x - r1_x
+    R_y = r2_y - r1_y
+    r1_dot_R = r1_x*R_x + r1_y*R_y
+    r2_dot_R = r2_x*R_x + r2_y*R_y
+    R_dot_R = R_x^2 + R_y^2
+    norm_r1 = sqrt(r1_x^2 + r1_y^2)
+    norm_r2 = sqrt(r2_x^2 + r2_y^2)
+    norm_R = sqrt(R_dot_R)
 
+    T1 = r1_dot_R/norm_R
+    T2 = r2_dot_R/norm_R
+    d_x = r1_x - r1_dot_R/R_dot_R*R_x
+    d_y = r1_y - r1_dot_R/R_dot_R*R_y
+    norm_d = sqrt(d_x^2 + d_y^2)
+    theta1 = asin(r1_dot_R/(norm_r1*norm_R))
+    theta2 = asin(r2_dot_R/(norm_r2*norm_R))
+    return 1/(2*pi)*(-1*(theta2 - theta1)*norm_d +
+           abs(T2 - T1) - T2*log(norm_r2) + T1*log(norm_r1))
+end
+
+# F kernel
+function kernel_integral(coll::Point, element::ConstantElement,
+                         ::FluxKernel)
+    # Geometry calculations
+    r1_x = element.p1.x - coll.x
+    r1_y = element.p1.y - coll.y
+    r2_x = element.p2.x - coll.x
+    r2_y = element.p2.y - coll.y
+    R_x = r2_x - r1_x
+    R_y = r2_y - r1_y
+    r1_dot_R = r1_x*R_x + r1_y*R_y
+    r2_dot_R = r2_x*R_x + r2_y*R_y
+    R_dot_R = R_x^2 + R_y^2
+    norm_r1 = sqrt(r1_x^2 + r1_y^2)
+    norm_r2 = sqrt(r2_x^2 + r2_y^2)
+    norm_R = sqrt(R_dot_R)
+
+    theta1 = asin(r1_dot_R/(norm_r1*norm_R))
+    theta2 = asin(r2_dot_R/(norm_r2*norm_R))
     return -1/(2*pi)*(theta2 - theta1)
 end
 
-# Form the linear system. After discretizing the boundary integral equations,
-# we have a sytem of the form Fu = Gq where F is the matrix of potential kernel
-# integrals, u is the vector of potential values on each element, G is the
-# matrix of flux kernal integrals and q is the vector of outward normal flux
-# values on each element.
-#
-# In general, we know some of the potential vector
-# values from our Dirichlet boundary conditions and some of the flux vector
-# values from out Neumann boundary conditions. We enforce the boundary
-# conditions by swapping the columns of F and Q such that all the unknowns
-# values are on the left hand side and all the known values are on the right
-# hand side. The matrix and vector on the right hand side are known, so we can
-# directly multiply them to get a right hand side vector b. The matrix on the
-# left hand side, A, corresponds to the vector of unknown potential and flux
-# values x. Thus, the system we need to solve is Ax = b.
+#function kernel_integral(coll::Point, element::LinearElement,
+#                         kernel::PotentialKernel)
+#end
 
-# Working, but is probably inefficient. Might be able to speed up by forming
-# A and B without the intermediate F and G matrices
-function form_system_2(discrete_boundary::Array{BoundaryElement})
-    n = length(discrete_boundary) # Number of boundary elements
+#function kernel_integral(coll::Point, element::LinearElement,
+#                         kernel::FluxKernel)
+#end
 
-    # Create F and G matrices
-    F = Array{Float64}(n,n)
-    G = Array{Float64}(n,n)
-    for i in 1:n # Iterate over collocation points
-        source = discrete_boundary[i].node
-        for j in 1:n # Iterate over boundary elements
-            if i == j
-                G[i,j] = kernel_integral(source, discrete_boundary[j],
-                                         Neumann())
-            else
-                F[i,j] = kernel_integral(source, discrete_boundary[j],
-                                         Dirichlet())
-                G[i,j] = kernel_integral(source, discrete_boundary[j],
-                                         Neumann())
-            end
-        end
-        diag = 0.0
-        for k in 1:n
-            diag += F[i,k]
-        end
-        F[i,i] = -1.0*diag
-    end
+#function kernel_integral(coll::Point, element::QuadraticElement,
+#                         kernel::PotentialKernel)
+#end
 
-    # Create A, B matrices and boundary condition vector. This is the enforce
-    # boundary condition step
-    A = Array{Float64}(n, n)
-    B = Array{Float64}(n, n)
-    bc_vec = Array{Float64}(n)
+#function kernel_integral(coll::Point, element::QuadraticElement,
+#                         kernel::FluxKernel)
+#end
+
+function build_system(mesh::Array{ConstantElement,1}, A::Array{Float64,2},
+                      B::Array{Float64,2}, bc_vec::Array{Float64,1})
+    n = length(mesh)
     for i in 1:n
-        if typeof(discrete_boundary[i]) == BoundaryElement{Dirichlet}
-            A[:,i] = -1.0*slice(G,:,i)
-            B[:,i] = -1.0*slice(F,:,i)
-        else
-            A[:,i] = slice(F,:,i)
-            B[:,i] = slice(G,:,i)
-        end
-        bc_vec[i] = discrete_boundary[i].value
-    end
-
-    # Create right had side vector
-    b = B*bc_vec
-
-    return A, b
-end
-
-# Not working right now, but an attempt to make system assembely faster
-function form_system(discrete_boundary::Array{BoundaryElement})
-    c = 0.5 # c(x) value from boundary integral formulation
-    n = length(discrete_boundary) # Number of boundary elements
-
-    # Create matrices
-    A = Array{Float64}(n, n) # LHS matrix for unknown vector
-    B = Array{Float64}(n, n) # RHS matrix for boundary condition vector
-    for i in 1:n # Iterate over source points
-        source = discrete_boundary[i].node
-        for j in 1:n # Iterate over boundary elements
-            bc_type = typeof(discrete_boundary[j])
-            if bc_type == BoundaryElement{Dirichlet}
-                TA = Neumann() # The LHS matrix has an unknown opposite the bc
-                TB = Dirichlet() # The RHS matrix corresponds to the known bc
-            else
-                TA = Dirichlet()
-                TB = Neumann()
-            end
-            A[i,j] = kernel_integral(source, discrete_boundary[j], TA)
-            B[i,j] = kernel_integral(source, discrete_boundary[j], TB)
-            # We add c(x) to the potential kernal integrals for diagonal entries
-            if i == j
-                if TA == Dirichlet
+        coll = mesh[i].node
+        bc_vec[i] = mesh[i].bc_node.val
+        for j in 1:n
+            if typeof(mesh[j].bc_node) <: Dirichlet
+                A[i,j] = -1.0*kernel_integral(coll, mesh[j], FluxKernel())
+                B[i,j] = -1.0*kernel_integral(coll, mesh[j], PotentialKernel())
+                if i == j
                     A[i,j] += 0.5
-                else
-                    B[i,j] += 0.5
+                end
+            else
+                A[i,j] = kernel_integral(coll, mesh[j], PotentialKernel())
+                B[i,j] = kernel_integral(coll, mesh[j], FluxKernel())
+                if i == j
+                    B[i,j] -= 0.5
                 end
             end
         end
     end
-
-    # Create boundary condition vector
-    bc_vec = Array{Float64}(n)
-    for i in 1:n
-        bc_vec[i] = discrete_boundary[i].value
-    end
-
-    # Form RHS vector
     b = B*bc_vec
-
     return A, b
 end
 
-# Take the DBEM solution vector and sort it into a vector of boundary potential
-# values and boundary flux values.
-function form_vectors(x::Array{Float64},
-                      discrete_boundary::Array{BoundaryElement})
-    n = length(x)
-    u = Array{Float64}(n)
-    q = Array{Float64}(n)
-    for i in 1:n
-        if typeof(discrete_boundary) == BoundaryElement{Dirichlet}
-            u[i] = discrete_boundary[i].value
-            q[i] = x[i]
-        else
-            u[i] = x[i]
-            q[i] = discrete_boundary[i].value
-        end
-    end
-    return u, q
-end
+function dbem_row()
+    bndy = model()
+    bc1 = Dirichlet(0.0)
+    bc2 = Dirichlet(100.0)
+    bc3 = Neumann(0.0)
+    bcs = [bc1, bc3, bc2, bc3]
+    res = [1000, 1000, 1000, 1000]
+    mesh = ConstantElement[]
+    mesh = discretize!(mesh, bndy, bcs, res)
 
-# Calculate the potential using the discrete boundary integral equation
-# u is the vector of potential values on the boundary and q is the vector of
-# flux values on the boundary.
-function field_values(u::Array{Float64}, q::Array{Float64},
-                      discrete_boundary::Array{BoundaryElement},
-                      field_points::Array{Point})
-    n1 = size(field_points,1)
-    n2 = size(field_points,2)
-    m = length(u)
-    f = Array{Float64}(m)
-    g = Array{Float64}(m)
-    pot_vals = Array{Float64}(size(field_points))
-    for i in 1:n1
-        for j in 1:n2
-            for k in 1:m
-                # Discrete potential kernal integrals
-                f[k] = kernel_integral(field_points[i,j], discrete_boundary[k],
-                                       Dirichlet())
-                # Discrete flux kernal integrals
-                g[k] = kernel_integral(field_points[i,j], discrete_boundary[k],
-                                       Neumann())
-                pot_vals[i,j] = dot(q,g) - dot(u,f)
-            end
-        end
-    end
-    return pot_vals
-end
-
-# Main function
-function dbem(nelm)
-    boundary, field_points = model()
-    discrete_boundary = discretize(boundary, nelm)
-    A, b = form_system_2(discrete_boundary)
-    # Direct solve
-    x = A\b
-    #u, q = form_vectors(x, discrete_boundary)
-    #pot_vals = field_values(u, q, discrete_boundary, field_points)
-    return x
+    n = length(mesh)
+    A = Array{Float64}(n,n)
+    B = Array{Float64}(n,n)
+    F = Array{Float64}(n,n)
+    G = Array{Float64}(n,n)
+    bc_vec = Array{Float64}(n)
+    A, b = build_system(mesh, A, B, bc_vec)
+    return A\b
 end
