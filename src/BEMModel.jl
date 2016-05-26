@@ -1,24 +1,62 @@
+include("BEMTypes.jl")
+
 ################################################################################
 # Define the geometry of the model. For now, this is directly input here.
 # Later on, this will read from a file and return a list of geometry points
 # that define the model boundary.
 ################################################################################
-function model()
+function normal(p::Tuple)
+    dx = p[2][1] - p[1][1]
+    dy = p[2][2] - p[1][2]
+    n = Normal(dy, -1.0*dx)/norm(Normal(dy, -1.0*dx))
+    return n
+end
+
+function make_model(element_order)
     # Outer boundary points
     p1 = Point(0.0, 0.0)
     p2 = Point(1.0, 0.0)
     p3 = Point(1.0, 2.0)
     p4 = Point(0.0, 2.0)
+    vertices = Point[p1, p2, p3, p4]
 
-    # Boundary segments
-    n1 = [p2.y - p1.y, p1.x - p2.x]/norm([p2.y - p1.y, p1.x - p2.x])
-    n2 = [p3.y - p2.y, p2.x - p3.x]/norm([p3.y - p2.y, p2.x - p3.x])
-    n3 = [p4.y - p3.y, p3.x - p4.x]/norm([p4.y - p3.y, p3.x - p4.x])
-    n4 = [p1.y - p4.y, p4.x - p1.x]/norm([p1.y - p4.y, p4.x - p1.x])
-    b1 = BoundarySegment(p1, p2, n1)
-    b2 = BoundarySegment(p2, p3, n2)
-    b3 = BoundarySegment(p3, p4, n3)
-    b4 = BoundarySegment(p4, p1, n4)
+    # Node ordering
+    n1 = Node(1)
+    n2 = Node(2)
+    n3 = Node(3)
+    n4 = Node(4)
+    nodes = Node[n1, n2, n3, n4]
+
+    # Boundary faces
+    f1 = Face(1, 2)
+    f2 = Face(2, 3)
+    f3 = Face(3, 4)
+    f4 = Face(4, 1)
+    faces = Face[f1, f2, f3, f4]
+
+    # Point connectivity.
+    c1 = Connect(1, 4)
+    c2 = Connect(1, 3)
+    c3 = Connect(2, 4)
+    c4 = Connect(4, 1)
+    connectivity = Connect[c1, c2, c3, c4]
+
+    # Boundary normals
+    normals = Normal[]
+    for i in 1:length(faces)
+        push!(normals, normal(vertices[faces[i]]))
+    end
+
+    # Boundary conditions
+    homogeneous(p::Point) = 0.0
+    hot(p::Point) = 100.0
+    bc1 = Dirichlet(homogeneous)
+    bc2 = Neumann(homogeneous)
+    bc3 = Dirichlet(hot)
+    bcs = BoundaryCondition[bc1, bc2, bc3]
+
+    # Boundary condition ids, faces[i] corresponds to bcids[i].
+    bcids = [1, 2, 3, 2]
 
     # Post processing field points
     n = 10
@@ -26,15 +64,12 @@ function model()
     dx = 1.0/(n + 1)
     u_point = Point[]
     for j in 1:n
-        u_point_col = Point[]
         for i in 1:n
-            push!(u_point_col, Point(i*dx, j*dy))
-        end
-        if j == 1
-            u_point = u_point_col
-        else
-            u_point = hcat(u_point, u_point_col)
+            push!(u_point, Point(i*dx, j*dy))
         end
     end
-    return [b1, b2, b3, b4], u_point
+
+    model = Model(vertices, faces, connectivity, normals, bcids, bcs,
+                  u_point, element_order)
+    return model
 end
